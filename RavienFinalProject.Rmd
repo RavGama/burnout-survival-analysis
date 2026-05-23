@@ -1,0 +1,349 @@
+---
+title: "Survival Analysis of Work From Home Burnout Onset"
+author: "Ravien Jules Gamalinda"
+date: "2026-03-30"
+output: html_document
+bibliography: referencesRG.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+Since global situations like COVID-19 and the technological advancements made in the past years, working from home has become more prevalent in society. However, because of the nature of remote work, especially with how relatively new it is, there are concerns about employees getting burnout at a different rate than in person. This data reports 180 employees over the course of 10 days, monitoring different things like how long they've worked, how many breaks they've taken, how many meetings they attended, and many more. This analysis utilized survival analysis in order to predict how quickly burnout occurs using reported variables, taking into account those who did not experience burnout. Specifically, this analysis addresses the following research question: which daily work-from-home behaviors predict how quickly an employee begins experiencing burnout symptoms?
+
+# Method Description
+
+Survival Analysis is a statistical method that models the time until an event happens. This method was originally used to model the probability of survival in patients after medical treatment. However, it has become useful in different fields such as engineering, economics, and other sciences. One important component of survival analysis is its ability to handle censored observations, which are unique subjects who did not experience the event we are looking at. The hazard function is a key concept in survival analysis, representing the instantaneous risk of the event occurring at time t, given that the subject has not yet experienced the event. In the context of this analysis, the hazard function represents the daily risk of burnout onset given that the employee has not yet burned out. Here is an example from the HSAUR textbook that uses the Kaplan-Meier curve, a component in survival analysis that estimates the probability of survival based on our data.
+
+```{r}
+library(survival)
+data("glioma", package = "coin")
+g3 <- subset(glioma, histology == "Grade3")
+plot(survfit(Surv(time, event) ~ group, data = g3),
+     main = "Grade III Glioma",
+     ylab = "Survival Probability",
+     xlab = "Survival Time in Months")
+survdiff(Surv(time, event) ~ group, data = g3)
+```
+
+From this output, we can see that the probability of survival between two groups is drastically different. In order to determine whether the curves are different, we can use the log-rank test to statistically prove the difference. From the output, we see that p = 0.01, which signifies there is a statistical difference between the control and the RIT group. While the Kaplan-Meier curve is useful for visualizing survival patterns between groups, it cannot account for multiple predictors simultaneously. The Cox Proportional Hazards model solves this by modeling the relationship between multiple predictors and the hazard of an event occurring. Unlike the Kaplan-Meier curve, the Cox model estimates a hazard ratio for each predictor while controlling for all others, making it the primary tool for multivariable survival analysis. Another component of this analysis is the use of the Hazard Ratio (HR), which quantifies each predictor's effect on the daily risk of burnout onset. An HR greater than 1.0 indicates the predictor increases burnout risk — the event occurs faster. An HR less than 1.0 indicates a protective effect — the predictor slows burnout onset. The 95% Confidence Interval (CI) provides a range of plausible values for the true HR. When the CI crosses 1.0, the direction of the effect is uncertain. A p-value below 0.05 indicates statistical significance. The standard Cox model assumes predictor values remain constant over time. However, when predictors change during the observation period — such as daily measurements of work hours or sleep — a time-dependent covariate approach is required. This involves restructuring data into counting process format using a start time (tstart) and stop time (tstop) for each observation interval, allowing the model to evaluate risk using that specific interval's covariate values rather than assuming constant exposure.
+
+# Survival Analysis using Work From Home Burnout Data set
+
+```{r, include=FALSE}
+library(readr)
+library(dplyr)
+library(GGally)
+library(ggplot2)
+library(survival)
+library(ggsurvfit)
+library(gtsummary)
+library(tidycmprsk)
+wfh_burnout <- read_csv("work_from_home_burnout_dataset.csv")
+```
+
+## EDA
+
+```{r, include=FALSE}
+table(wfh_burnout$day_type)
+table(wfh_burnout$burnout_risk)
+```
+
+```{r, echo=FALSE}
+ggpairs(wfh_burnout, columns = c("work_hours", "screen_time_hours", "after_hours_work", "meetings_count"))
+
+ggpairs(wfh_burnout, columns = c("sleep_hours", "breaks_taken", "task_completion_rate"))
+
+```
+
+Our EDA shows work_hours and screen_time_hours are correlated, almost identical. In order to avoid collinearity, we exclude screen_time_hours.
+
+## Preprocessing
+
+```{r, include=FALSE}
+wfh <- wfh_burnout |> 
+  group_by(user_id) |> 
+  mutate(day = row_number())
+
+wfh_burnt <- wfh |> 
+  group_by(user_id) |>
+  filter(burnout_risk != "Low") |>
+  slice_min(order_by = day) 
+
+
+wfh_not_burnt <- wfh |>
+  group_by(user_id) |>
+  filter(burnout_risk == "Low")
+
+
+wfh <-bind_rows(wfh_burnt, wfh_not_burnt) |>
+  mutate(burnt_out =ifelse(burnout_risk != "Low", 1 , 0)) |>
+  arrange(user_id, day) |>
+  ungroup()
+
+table(wfh$burnt_out)
+```
+
+## Spaghetti Plot
+
+```{r, echo=FALSE}
+wfh <- wfh |>
+  group_by(user_id) |>
+  mutate(ever_burnt = max(burnt_out)) |>
+  ungroup()
+
+ever_burnt_labels <- c("0" = "No Burnout Onset", 
+                        "1" = "Burnout Onset")
+
+p <- ggplot(data = wfh, 
+            aes(x = day, 
+                y = burnout_score, 
+                group = user_id, 
+                color = factor(ever_burnt,
+                               labels = c("No Burnout Onset", 
+                                          "Burnout Onset"))))
+p + geom_line(alpha = 0.3) +
+  stat_summary(aes(group = 1),
+               geom = "line",
+               fun = mean,
+               color = "black",
+               linewidth = 1.5) +
+  facet_grid(. ~ ever_burnt, 
+             labeller = labeller(ever_burnt = ever_burnt_labels)) +
+  labs(
+    title = "Burnout Score Trajectories Over 10 Days",
+    subtitle = "Bold line represents group mean trajectory",
+    x = "Day",
+    y = "Burnout Score",
+    color = "Burnout Status"
+  ) +
+  theme_minimal()
+```
+
+From this spaghetti plot, we see that employees who experienced burnout onset show a steeper upward trajectory in burnout score compared to those who did not. The bold black line represents the group mean trajectory, showing the average burnout score progression over 10 days for each group. This progressive buildup supports the use of a time-dependent covariate approach — burnout develops gradually rather than occurring suddenly.
+
+## Boxplots
+
+```{r, echo=FALSE}
+ggplot(wfh, aes(x = factor(burnt_out), 
+                y = work_hours, 
+                fill = factor(burnt_out))) +  
+  geom_boxplot() +
+  scale_x_discrete(labels = c("0" = "No Burnout Onset", 
+                               "1" = "Burnout Onset")) +
+  scale_fill_manual(values = c("0" = "steelblue", "1" = "tomato"),
+                    labels = c("0" = "No Burnout Onset", 
+                               "1" = "Burnout Onset")) +
+  labs(
+    title = "Daily Work Hours by Burnout Onset Status",
+    x = "Burnout Status",
+    y = "Daily Work Hours",
+    fill = "Burnout Status"
+  ) +
+  theme_minimal()
+
+
+ggplot(wfh, aes(x = factor(burnt_out), 
+                y = sleep_hours, 
+                fill = factor(burnt_out))) +
+  geom_boxplot() +
+  scale_x_discrete(labels = c("0" = "No Burnout Onset", 
+                               "1" = "Burnout Onset")) +
+  scale_fill_manual(values = c("0" = "steelblue", "1" = "tomato"),
+                    labels = c("0" = "No Burnout Onset", 
+                               "1" = "Burnout Onset")) +
+  labs(
+    title = "Daily Sleep Hours by Burnout Onset Status",
+    x = "Burnout Status",
+    y = "Sleep Hours",
+    fill = "Burnout Status"
+  ) +
+  theme_minimal()
+
+
+
+ggplot(wfh, aes(x = factor(after_hours_work), 
+                fill = factor(burnt_out))) +
+  geom_bar(position = "dodge") +
+  scale_x_discrete(labels = c("0" = "No After Hours Work", 
+                               "1" = "After Hours Work")) +
+  scale_fill_manual(values = c("0" = "steelblue", "1" = "tomato"),
+                    labels = c("0" = "No Burnout Onset", 
+                               "1" = "Burnout Onset")) +
+  labs(
+    title = "After Hours Work by Burnout Onset Status",
+    x = "After Hours Work Status",
+    y = "Count",
+    fill = "Burnout Status"
+  ) +
+  theme_minimal()
+
+
+ggplot(wfh, aes(x = factor(burnt_out), 
+                y = meetings_count, 
+                fill = factor(burnt_out))) +
+  geom_boxplot() +
+  scale_x_discrete(labels = c("0" = "No Burnout Onset", 
+                               "1" = "Burnout Onset")) +
+  scale_fill_manual(values = c("0" = "steelblue", "1" = "tomato"),
+                    labels = c("0" = "No Burnout Onset", 
+                               "1" = "Burnout Onset")) +
+  labs(
+    title = "Daily Meetings Count by Burnout Onset Status",
+    x = "Burnout Status",
+    y = "Number of Meetings",
+    fill = "Burnout Status"
+  ) +
+  theme_minimal()
+
+
+ggplot(wfh, aes(x = factor(breaks_taken), 
+                fill = factor(burnt_out))) + 
+  geom_bar(position = "dodge") +
+  scale_fill_manual(values = c("0" = "steelblue", "1" = "tomato"),
+                    labels = c("0" = "No Burnout Onset", 
+                               "1" = "Burnout Onset")) +
+  labs(
+    title = "Breaks Taken by Burnout Onset Status",
+    x = "Number of Breaks Taken",
+    y = "Count",
+    fill = "Burnout Status"
+  ) +
+  theme_minimal()
+```
+
+The selected predictors are work_hours, sleep_hours, after_hours_work, meetings_count, and breaks_taken. screen_time_hours is excluded because, since the data is from a working from home report, it makes sense that most (if not all) work hours is online / looking at a screen. There is also a very strong positive correlation between screen_time_hours and work_hours to support this claim. task_completion_rate is not being used because being burnt out affects how much work you do, not vice versa.
+
+## Time varying Covariates
+
+```{r, include=FALSE}
+## This coxph is not the right model to use because it assumes that the predictors are constant over the days when it actually changes over time
+wfh_cox <- coxph(Surv(day, burnt_out) ~ work_hours + sleep_hours + breaks_taken + meetings_count + after_hours_work, data = wfh)
+summary(wfh_cox) 
+
+wfh_zph <- cox.zph(wfh_cox)
+wfh_zph
+```
+
+```{r, echo=FALSE}
+## Because the burnout happens over a few days, and our predictors are being measured every day, we must use time-dependent covariate approach
+wfh <- wfh |> mutate(tstart = day - 1,tstop = day)
+
+
+survfit2(Surv(time = tstart, time2 = tstop, event = burnt_out) ~ 
+           after_hours_work, data = wfh) |> 
+  ggsurvfit() +
+  scale_color_manual(
+    values = c("steelblue", "tomato"),
+    labels = c("after_hours_work=0" = "No After Hours Work", 
+               "after_hours_work=1" = "After Hours Work")
+  ) +
+  labs(
+    title = "Survival Curves by After Hours Work Status",
+    subtitle = "Probability of no burnout onset over 10 days",
+    x = "Day",
+    y = "Probability of No Burnout Onset",
+    color = "After Hours Work"
+  ) +
+  theme_minimal()
+```
+
+This Kaplan-Meier curve shows the probability that an employee will not yet experience burnout onset over 10 days, split by whether they worked after hours or not. Employees who work after hours show a consistently lower survival probability throughout the observation period, suggesting they experience burnout onset sooner. The log-rank test below formally tests whether this difference is statistically significant.
+
+```{r, echo=FALSE}
+wfh_simple <- wfh |>
+  group_by(user_id) |>
+  summarise(
+    day = max(day),
+    burnt_out = max(burnt_out),
+    after_hours_work = max(after_hours_work)
+  )
+
+survdiff(Surv(day, burnt_out) ~ after_hours_work, data = wfh_simple)
+```
+
+The log-rank test confirms a statistically significant difference in burnout onset timing between employees who work after hours and those who do not (p=0.02). However, this significance diminishes in the full Cox model when other daily behaviors are controlled for, suggesting after hours work is correlated with other burnout predictors rather than acting as an independent predictor.
+
+## Cox Proportional Hazard
+
+```{r, echo=FALSE}
+coxph(
+  Surv(time = tstart, time2 = tstop, event = burnt_out) ~ after_hours_work, 
+  data = wfh
+  ) |> 
+  tbl_regression(exp = TRUE)
+
+coxph(
+  Surv(time = tstart, time2 = tstop, event = burnt_out) ~ work_hours, 
+  data = wfh
+  ) |> 
+  tbl_regression(exp = TRUE)
+
+coxph(
+  Surv(time = tstart, time2 = tstop, event = burnt_out) ~ sleep_hours, 
+  data = wfh
+  ) |> 
+  tbl_regression(exp = TRUE)
+
+coxph(
+  Surv(time = tstart, time2 = tstop, event = burnt_out) ~ meetings_count, 
+  data = wfh
+  ) |> 
+  tbl_regression(exp = TRUE)
+
+coxph(
+  Surv(time = tstart, time2 = tstop, event = burnt_out) ~ breaks_taken, 
+  data = wfh
+  ) |> 
+  tbl_regression(exp = TRUE)
+
+coxph(
+  Surv(time = tstart, time2 = tstop, event = burnt_out) ~ after_hours_work + work_hours + sleep_hours + meetings_count + breaks_taken, 
+  data = wfh
+  ) |> 
+  tbl_regression(exp = TRUE)
+```
+
+We observe that after_hours_work, work_hours, and meetings_count have HRs above 1, denoting that, independently, as these predictors increase, the hazard of burnout onset increases. On the other hand, both sleep_hours and breaks_taken have HRs below 1, which indicates that these predictors help decrease the hazard of burnout onset in employees. It is also important to note the confidence intervals and p-values of these predictors, as we can see that work_hours, sleep_hours, and meetings_count have p-values below 0.05 and CIs that do not include 1.0. These statistics tell us they are not only significant predictors, but that the hazard ratio for each of these predictors truly reflects the increased hazard of burnout onset (work_hours and meetings_count) and decreased hazard of burnout onset (sleep_hours).
+
+```{r, echo=FALSE}
+wfh_cox_full <- coxph(Surv(time = tstart, time2 = tstop, event = burnt_out) ~ after_hours_work + work_hours + sleep_hours + meetings_count + breaks_taken, data = wfh)
+summary(wfh_cox_full)
+
+wfh_zph_full <- cox.zph(wfh_cox_full)
+wfh_zph_full
+```
+
+We can see from the full model that work_hours (p\<0.001), sleep_hours (p=0.001), and meetings_count (p=0.013) are statistically significant predictors of burnout onset. breaks_taken and after_hours_work are not significant when controlling for other predictors. cox.zph() tests whether each predictor's hazard ratio remains constant over the 10 day observation period. Since all p-values are above 0.05 and the global p-value confirms overall model validity, the proportional hazards assumption is satisfied.
+
+```{r, echo=FALSE}
+wfh_cox_reduced <- coxph(Surv(time = tstart, time2 = tstop, event = burnt_out) ~ work_hours + sleep_hours + meetings_count, data = wfh)
+summary(wfh_cox_reduced)
+
+wfh_zph_reduced <- cox.zph(wfh_cox_reduced)
+wfh_zph_reduced
+```
+
+```{r, echo=FALSE}
+anova(wfh_cox_reduced, wfh_cox_full)
+```
+
+We fitted a reduced model in order to verify whether a reduced model would fit better than the full model. From here we see that while there is not a big difference between models, as the difference between loglik is very small and the p-value being above 0.05 means the full model does not significantly fit better.
+
+An exploratory interaction between work_hours and sleep_hours was tested, based on the hypothesis that less sleep compounds the effect of long working hours on burnout onset.
+
+```{r, echo=FALSE}
+wfh_cox <- coxph(Surv(tstart, tstop, burnt_out) ~ work_hours + sleep_hours + work_hours:sleep_hours, data = wfh)
+summary(wfh_cox)
+```
+
+As we can tell, the interaction between work_hours and sleep_hours is not significant in predicting burnout.
+
+# Conclusion
+
+From our analysis, we can conclude that the biggest factors that contribute to employees experiencing burnout are work_hours (HR=1.25), sleep_hours (HR=0.72), and meetings_count (HR=1.17). Together, these three predictors showcase the challenges of working at home, as working more intensely leads to less time to take a step back and relax. It is important to note that our data is not perfect, as there were definitely some limitations with the observations. Firstly, 10 days is insufficient to accurately measure whether an employee is displaying signs of burnout. Secondly, the fact that the data was clean from the start suggests that the reporting was modified and we do not know the raw data, or numbers could be made up. Lastly, only 81 of the 180 employees experienced burnout onset. A larger sample of employees, especially those who experience burnout, would have a greater impact on the reliability of the models. For future analysis, the limitations should be addressed. Extending the observation time frame to a month or so would more fully capture the buildup of burnout. Additionally, observing the days where employees do not work would help determine whether burnout symptoms decrease during those periods. Of course, a company with a greater number of remote employees observed would be ideal as well. This way, we can apply survival analysis, alongside other models, in order to see how burnout accumulates over time.
+
+# Bibliography
